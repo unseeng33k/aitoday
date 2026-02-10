@@ -1,0 +1,19 @@
+{
+  "name": "obsidian-multi-ai-daily-log",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "build:types": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "package:obsidian": "npm run build && mkdir -p Export && cp main.js Export/main.js && cp manifest.json Export/manifest.json && cd Export && zip -FS multi-ai-daily-log-obsidian.zip main.js manifest.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "esbuild": "^0.27.3",
+    "obsidian": "^1.8.7",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

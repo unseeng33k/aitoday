@@ -1,0 +1,10 @@
+{
+  "id": "multi-ai-daily-log",
+  "name": "Multi AI Daily Log",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Run a prompt against OpenAI, Claude, and Gemini APIs and insert a merged technical log into today's daily note.",
+  "author": "aitoday",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}
