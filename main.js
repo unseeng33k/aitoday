@@ -833,18 +833,25 @@ var MultiAIDailyLogPlugin = class extends import_obsidian2.Plugin {
     });
     return { markdown, dateKey };
   }
+  buildConfigurationStatusLines() {
+    const missing = [];
+    if (!this.settings.crossAiPrompt.trim()) {
+      missing.push("Set `Cross-AI prompt` in plugin settings.");
+    }
+    const hasAnyProviderKey = Boolean(this.settings.openaiApiKey.trim()) || Boolean(this.settings.anthropicApiKey.trim()) || Boolean(this.settings.geminiApiKey.trim());
+    if (!hasAnyProviderKey) {
+      missing.push("Add at least one provider API key (OpenAI, Anthropic, or Gemini).");
+    }
+    return missing;
+  }
   async generateAndInsertDailyLog(manualRun) {
     try {
-      const { markdown, dateKey } = await this.generateDailyLogMarkdown();
-      const hasConfiguredInputs = this.settings.openaiApiKey.trim() || this.settings.anthropicApiKey.trim() || this.settings.geminiApiKey.trim();
-      if (!hasConfiguredInputs) {
-        new import_obsidian2.Notice("Set at least one provider API key in plugin settings before running.");
-        return;
-      }
-      if (!this.settings.crossAiPrompt.trim()) {
-        new import_obsidian2.Notice("Set a Cross-AI prompt before running.");
-        return;
-      }
+      const dateKey = getYesterdayDateKey(this.getEffectiveTimezone());
+      const missingConfiguration = this.buildConfigurationStatusLines();
+      const markdown = missingConfiguration.length > 0 ? renderDailyLogBlock(missingConfiguration, dateKey, this.settings.crossAiPrompt, {
+        title: this.settings.logTitle,
+        markdownHeadingPrefix: this.settings.logTitleMarkdownSize
+      }) : (await this.generateDailyLogMarkdown()).markdown;
       const note = await resolveTodaysDailyNote(this.app);
       const content = await this.app.vault.read(note);
       const updated = upsertDailyLogInContent(content, markdown, {
@@ -855,7 +862,8 @@ var MultiAIDailyLogPlugin = class extends import_obsidian2.Plugin {
       this.state = markRunForDate(this.state, dateKey);
       await this.savePluginData();
       if (manualRun) {
-        new import_obsidian2.Notice(`Inserted daily AI log for ${dateKey}.`);
+        const configurationSuffix = missingConfiguration.length > 0 ? " (configuration hints included)" : "";
+        new import_obsidian2.Notice(`Inserted daily AI log for ${dateKey}${configurationSuffix}.`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";

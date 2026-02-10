@@ -31,6 +31,8 @@ var import_obsidian2 = require("obsidian");
 var OPENAI_URL = "https://api.openai.com/v1/responses";
 var ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 var GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+var RETRYABLE_HTTP_STATUS = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
+var MAX_REQUEST_ATTEMPTS = 2;
 var truncate = (value, max = 240) => {
   const compact = value.replace(/\s+/g, " ").trim();
   if (!compact) return "No technical response content.";
@@ -39,6 +41,75 @@ var truncate = (value, max = 240) => {
 function normalizeResponseText(input) {
   if (typeof input === "string") return input;
   return "";
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function readErrorMessageFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const record = payload;
+  if (typeof record.message === "string" && record.message.trim()) {
+    return record.message.trim();
+  }
+  if (typeof record.error === "string" && record.error.trim()) {
+    return record.error.trim();
+  }
+  if (record.error && typeof record.error === "object") {
+    const errorObj = record.error;
+    const parts = [errorObj.type, errorObj.status, errorObj.message].filter((part) => typeof part === "string" && part.trim().length > 0).map((part) => part.trim());
+    if (parts.length > 0) return parts.join(" - ");
+  }
+  return "";
+}
+async function readErrorDetail(response) {
+  try {
+    const payload = await response.json();
+    const fromPayload = readErrorMessageFromPayload(payload);
+    if (fromPayload) return fromPayload;
+  } catch {
+  }
+  return "";
+}
+function buildHttpError(provider, status, detail) {
+  if (detail) return new Error(`${provider} request failed (${status}): ${detail}`);
+  return new Error(`${provider} request failed (${status})`);
+}
+function buildNetworkError(provider, cause) {
+  const reason = cause instanceof Error ? cause.message : "Unknown network error";
+  return new Error(
+    `${provider} network error: ${reason}. Check internet, firewall/VPN/proxy, and API endpoint access.`
+  );
+}
+function isRetryableNetworkError(cause) {
+  if (!(cause instanceof Error)) return false;
+  const message = cause.message.toLowerCase();
+  return message.includes("failed to fetch") || message.includes("network") || message.includes("timeout") || message.includes("econnreset") || message.includes("temporar");
+}
+async function postWithRetry(provider, request) {
+  for (let attempt = 1; attempt <= MAX_REQUEST_ATTEMPTS; attempt++) {
+    try {
+      const response = await request();
+      if (response.ok) return response;
+      const canRetry = RETRYABLE_HTTP_STATUS.has(response.status) && attempt < MAX_REQUEST_ATTEMPTS;
+      if (canRetry) {
+        await sleep(600 * attempt);
+        continue;
+      }
+      const detail = await readErrorDetail(response);
+      throw buildHttpError(provider, response.status, detail);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("request failed")) {
+        throw error;
+      }
+      const canRetry = attempt < MAX_REQUEST_ATTEMPTS && isRetryableNetworkError(error);
+      if (canRetry) {
+        await sleep(600 * attempt);
+        continue;
+      }
+      throw buildNetworkError(provider, error);
+    }
+  }
+  throw new Error(`${provider} request failed (unknown)`);
 }
 function readOpenAIText(payload) {
   const data = payload;
@@ -68,55 +139,55 @@ function readGeminiText(payload) {
   return parts.map((part) => typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
 }
 async function queryOpenAI(apiKey, model, prompt, fetchFn) {
-  const response = await fetchFn(OPENAI_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      input: prompt
+  const response = await postWithRetry(
+    "OpenAI",
+    () => fetchFn(OPENAI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        input: prompt
+      })
     })
-  });
-  if (!response.ok) {
-    throw new Error(`OpenAI request failed (${response.status})`);
-  }
+  );
   const payload = await response.json();
   return readOpenAIText(payload);
 }
 async function queryAnthropic(apiKey, model, prompt, fetchFn) {
-  const response = await fetchFn(ANTHROPIC_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1200,
-      messages: [{ role: "user", content: prompt }]
+  const response = await postWithRetry(
+    "Anthropic",
+    () => fetchFn(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1200,
+        messages: [{ role: "user", content: prompt }]
+      })
     })
-  });
-  if (!response.ok) {
-    throw new Error(`Anthropic request failed (${response.status})`);
-  }
+  );
   const payload = await response.json();
   return readAnthropicText(payload);
 }
 async function queryGemini(apiKey, model, prompt, fetchFn) {
   const url = `${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const response = await fetchFn(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
+  const response = await postWithRetry(
+    "Gemini",
+    () => fetchFn(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      })
     })
-  });
-  if (!response.ok) {
-    throw new Error(`Gemini request failed (${response.status})`);
-  }
+  );
   const payload = await response.json();
   return readGeminiText(payload);
 }
@@ -197,6 +268,13 @@ function extractGenericMarker(content) {
 function isGeneratedActivityHeading(line) {
   return /^###\s+AI Technical Activity \(\d{4}-\d{2}-\d{2}\)\s*$/.test(line.trim());
 }
+function isGeneratedLogListItem(line) {
+  if (typeof line !== "string") return false;
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("- ")) return false;
+  if (/^-\s+\d{2}:\d{2}\s+-\s+\[[^\]]+\]\s+.+$/.test(trimmed)) return true;
+  return trimmed === "- No AI activity found from configured providers for yesterday.";
+}
 function isListItem(line) {
   return typeof line === "string" && line.trim().startsWith("- ");
 }
@@ -211,10 +289,22 @@ function stripGeneratedLogBlocks(section) {
     const next = lines[i + 1];
     const nextNext = lines[i + 2];
     const hasOptionalTitleThenActivity = isMarkdownHeading(current) && isGeneratedActivityHeading(next ?? "") && isListItem(nextNext);
+    const hasTitleThenGeneratedLogItems = isMarkdownHeading(current) && isGeneratedLogListItem(next);
     const hasActivityHeading = isGeneratedActivityHeading(current) && isListItem(next);
     if (hasOptionalTitleThenActivity) {
       i += 2;
       while (i < lines.length && isListItem(lines[i])) {
+        i++;
+      }
+      while (i < lines.length && !lines[i].trim()) {
+        i++;
+      }
+      i -= 1;
+      continue;
+    }
+    if (hasTitleThenGeneratedLogItems) {
+      i += 1;
+      while (i < lines.length && isGeneratedLogListItem(lines[i])) {
         i++;
       }
       while (i < lines.length && !lines[i].trim()) {
@@ -467,11 +557,11 @@ function normalizeMarkdownHeadingPrefix(value) {
   return match ? match[0] : "####";
 }
 function renderDailyLogBlock(entries, dateKey, crossAiPrompt, options) {
+  void dateKey;
   const summaryTitle = options?.title?.trim() || summarizePromptToHeading(crossAiPrompt);
   const headingPrefix = normalizeMarkdownHeadingPrefix(options?.markdownHeadingPrefix ?? "####");
   const body = entries.length > 0 ? entries.map((entry) => `- ${entry}`).join("\n") : "- No AI activity found from configured providers for yesterday.";
   return `${headingPrefix} ${summaryTitle}
-### AI Technical Activity (${dateKey})
 ${body}`;
 }
 
@@ -743,18 +833,25 @@ var MultiAIDailyLogPlugin = class extends import_obsidian2.Plugin {
     });
     return { markdown, dateKey };
   }
+  buildConfigurationStatusLines() {
+    const missing = [];
+    if (!this.settings.crossAiPrompt.trim()) {
+      missing.push("Set `Cross-AI prompt` in plugin settings.");
+    }
+    const hasAnyProviderKey = Boolean(this.settings.openaiApiKey.trim()) || Boolean(this.settings.anthropicApiKey.trim()) || Boolean(this.settings.geminiApiKey.trim());
+    if (!hasAnyProviderKey) {
+      missing.push("Add at least one provider API key (OpenAI, Anthropic, or Gemini).");
+    }
+    return missing;
+  }
   async generateAndInsertDailyLog(manualRun) {
     try {
-      const { markdown, dateKey } = await this.generateDailyLogMarkdown();
-      const hasConfiguredInputs = this.settings.openaiApiKey.trim() || this.settings.anthropicApiKey.trim() || this.settings.geminiApiKey.trim();
-      if (!hasConfiguredInputs) {
-        new import_obsidian2.Notice("Set at least one provider API key in plugin settings before running.");
-        return;
-      }
-      if (!this.settings.crossAiPrompt.trim()) {
-        new import_obsidian2.Notice("Set a Cross-AI prompt before running.");
-        return;
-      }
+      const dateKey = getYesterdayDateKey(this.getEffectiveTimezone());
+      const missingConfiguration = this.buildConfigurationStatusLines();
+      const markdown = missingConfiguration.length > 0 ? renderDailyLogBlock(missingConfiguration, dateKey, this.settings.crossAiPrompt, {
+        title: this.settings.logTitle,
+        markdownHeadingPrefix: this.settings.logTitleMarkdownSize
+      }) : (await this.generateDailyLogMarkdown()).markdown;
       const note = await resolveTodaysDailyNote(this.app);
       const content = await this.app.vault.read(note);
       const updated = upsertDailyLogInContent(content, markdown, {
@@ -765,7 +862,8 @@ var MultiAIDailyLogPlugin = class extends import_obsidian2.Plugin {
       this.state = markRunForDate(this.state, dateKey);
       await this.savePluginData();
       if (manualRun) {
-        new import_obsidian2.Notice(`Inserted daily AI log for ${dateKey}.`);
+        const configurationSuffix = missingConfiguration.length > 0 ? " (configuration hints included)" : "";
+        new import_obsidian2.Notice(`Inserted daily AI log for ${dateKey}${configurationSuffix}.`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
