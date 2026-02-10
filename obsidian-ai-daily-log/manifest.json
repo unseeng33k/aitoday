@@ -1,0 +1,12 @@
+{
+  "id": "ai-daily-log",
+  "name": "AI Daily Log",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Every morning at 7am, append a technical one-line log of yesterday's AI conversations to today's daily note.",
+  "author": "Custom",
+  "authorUrl": "https://example.com",
+  "isDesktopOnly": true,
+  "js": "main.js"
+}
+
